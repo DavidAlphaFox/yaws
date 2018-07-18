@@ -1128,6 +1128,11 @@ fload(FD, GC, Cs, Lno, Chars) ->
             fload(FD, GC#gconf{ysession_mod = Ysession_mod}, Cs,
                   Lno+1, ?NEXTLINE);
 
+        ["ysession_cookiegen", '=', Mod_str] ->
+            Ysession_cookiegen = list_to_atom(Mod_str),
+            fload(FD, GC#gconf{ysession_cookiegen = Ysession_cookiegen}, Cs,
+                  Lno+1, ?NEXTLINE);
+
         ["ysession_idle_timeout", '=', YsessionIdle] ->
             case (catch list_to_integer(YsessionIdle)) of
                 I when is_integer(I), I > 0 ->
@@ -1723,7 +1728,7 @@ fload(FD, server, GC, C, Lno, Chars) ->
                     fload(FD, server, GC, C1, Lno+1, ?NEXTLINE);
                 {error, Reason} ->
                     {error,
-                     ?F("Invalide php_handler configuration at line ~w: ~s",
+                     ?F("Invalid php_handler configuration at line ~w: ~s",
                         [Lno, Reason])}
             end;
 
@@ -2596,7 +2601,7 @@ is_string_char([C|T]) ->
             %% FIXME check that [C, hd(T)] really is a char ?? how
             utf8;
         true ->
-            lists:member(C, [$., $/, $:, $_, $-, $+, $~, $@, $*])
+            lists:member(C, [$., $/, $:, $_, $-, $+, $~, $@, $*, $?])
     end.
 
 is_special(C) ->

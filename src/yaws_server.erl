@@ -1043,11 +1043,13 @@ acceptor0(GS, Top) ->
         {ok, Client} ->
             if
                 GS#gs.ssl == ssl ->
-                    case ssl:ssl_accept(
-                           Client, (GS#gs.gconf)#gconf.keepalive_timeout
-                          ) of
-                        ok ->
-                            ok;
+                    SslTimeout = (GS#gs.gconf)#gconf.keepalive_timeout,
+                    %% TODO: the following should call the portability
+                    %% function yaws_dynopts:ssl_handshake/2 instead
+                    %% of performing a masked call to ssl_accept/2,
+                    %% since the latter is deprecated.
+                    case (fun ssl:ssl_accept/2)(Client, SslTimeout) of
+                        ok -> ok;
                         {error, closed} ->
                             Top ! {self(), decrement},
                             exit(normal);
@@ -2127,21 +2129,7 @@ handle_auth(ARG, _Auth_H, Auth_methods=#auth{users=[],pam=false,mod=[]}, Ret) ->
     {Ret, Auth_methods};
 
 handle_auth(ARG, Auth_H, Auth_methods = #auth{mod = Mod}, Ret) when Mod /= [] ->
-    case catch Mod:auth(ARG, Auth_methods) of
-        {'EXIT', Reason} ->
-            L = ?F("authmod crashed ~n~p:auth(~p, ~n ~p) \n"
-                   "Reason: ~p~n"
-                   "Stack: ~p~n",
-                   [Mod, ARG, Auth_methods, Reason,
-                    erlang:get_stacktrace()]),
-            handle_crash(ARG, L),
-            CliSock = case yaws_api:get_sslsocket(ARG#arg.clisock) of
-                          {ok, SslSock} -> SslSock;
-                          undefined     -> ARG#arg.clisock
-                      end,
-            deliver_accumulated(CliSock),
-            exit(normal);
-
+    try Mod:auth(ARG, Auth_methods) of
         %% appmod means the auth headers are undefined, i.e. false.
         %% TODO: change so that authmods simply return true/false
         {true, User} ->
@@ -2160,6 +2148,21 @@ handle_auth(ARG, Auth_H, Auth_methods = #auth{mod = Mod}, Ret) when Mod /= [] ->
         _ ->
             maybe_auth_log(403, ARG),
             false_403
+    catch
+        ?MAKE_ST(_:Reason,ST,
+                 begin
+                     L = ?F("authmod crashed ~n~p:auth(~p, ~n ~p) \n"
+                            "Reason: ~p~n"
+                            "Stack: ~p~n",
+                            [Mod, ARG, Auth_methods, Reason, ST]),
+                     handle_crash(ARG, L),
+                     CliSock = case yaws_api:get_sslsocket(ARG#arg.clisock) of
+                                   {ok, SslSock} -> SslSock;
+                                   undefined     -> ARG#arg.clisock
+                               end,
+                     deliver_accumulated(CliSock),
+                     exit(normal)
+                 end)
     end;
 
 %% if the headers are undefined we do not need to check Pam or Users
@@ -2723,7 +2726,7 @@ deliver_xxx(CliSock, _Req, Code) ->
     deliver_xxx(CliSock, _Req, Code, "").
 deliver_xxx(CliSock, _Req, Code, ExtraHtml) ->
     B = ["<html><h1>", integer_to_list(Code), $\ ,
-         yaws_api:code_to_phrase(Code), "</h1></html>", ExtraHtml],
+         yaws_api:code_to_phrase(Code), "</h1>", ExtraHtml, "</html>"],
     Sz = iolist_size(B),
     Server = case get(sc) of
                  undefined -> undefined;
@@ -2879,9 +2882,9 @@ deliver_dyn_part(CliSock,                       % essential params
                    Res = YawsFun(Arg),
                    handle_out_reply(Res, LineNo, YawsFile, UT, Arg)
                catch
-                   Class:Exc ->
-                       handle_out_reply({throw, Class, Exc}, LineNo,
-                                        YawsFile, UT, Arg)
+                   ?MAKE_ST(Class:Exc,St,
+                            handle_out_reply({throw, Class, Exc, St}, LineNo,
+                                             YawsFile, UT, Arg))
                end,
     case OutReply of
         {get_more, Cont, State} when element(1, Arg#arg.clidata) == partial  ->
@@ -3313,7 +3316,7 @@ handle_out_reply({'EXIT', normal}, _LineNo, _YawsFile, _UT, _ARG) ->
 handle_out_reply({ssi, File, Delimiter, Bindings}, LineNo, YawsFile, UT, ARG) ->
     case ssi(File, Delimiter, Bindings, UT, ARG) of
         {error, Rsn} ->
-            L = ?F("yaws code at~s:~p had the following err:~n~p",
+            L = ?F("yaws code at ~s:~p had the following err:~n~p",
                    [YawsFile, LineNo, Rsn]),
             handle_crash(ARG, L);
         OutData ->
@@ -3400,16 +3403,15 @@ handle_out_reply({'EXIT', Err}, LineNo, YawsFile, _UT, ARG) ->
            "File: ~s:~w~n"
            "Reason: ~p~nReq: ~p~n"
            "Stack: ~p~n",
-           [YawsFile, LineNo, Err, ARG#arg.req, erlang:get_stacktrace()]),
+           [YawsFile, LineNo, Err, ARG#arg.req, ?stack()]),
     handle_crash(ARG, L);
 
-handle_out_reply({throw, Class, Exc}, LineNo, YawsFile, _UT, ARG) ->
+handle_out_reply({throw, Class, Exc, St}, LineNo, YawsFile, _UT, ARG) ->
     L = ?F("~n~nERROR erlang code threw an uncaught exception:~n "
            "File: ~s:~w~n"
            "Class: ~p~nException: ~p~nReq: ~p~n"
            "Stack: ~p~n",
-           [YawsFile, LineNo, Class, Exc, ARG#arg.req,
-            erlang:get_stacktrace()]),
+           [YawsFile, LineNo, Class, Exc, ARG#arg.req, St]),
     handle_crash(ARG, L);
 
 handle_out_reply({get_more, Cont, State}, _LineNo, _YawsFile, _UT, _ARG) ->
@@ -3459,8 +3461,9 @@ handle_out_reply_l([Reply|T], LineNo, YawsFile, UT, ARG, Res) ->
             Reply;
         ok ->
             handle_out_reply_l(T, LineNo, YawsFile, UT, ARG, Res);
+        #arg{}=NewArg ->
+            handle_out_reply_l(T, LineNo, YawsFile, UT, NewArg, Res);
         RetVal ->
-            %% XXX: if RetVal == #arg{}, replace ARG in recursion ?
             handle_out_reply_l(T, LineNo, YawsFile, UT, ARG, RetVal)
     end;
 handle_out_reply_l([], _LineNo, _YawsFile, _UT, _ARG, Res) ->

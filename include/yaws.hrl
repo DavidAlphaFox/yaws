@@ -101,11 +101,12 @@
           %% automatically setup in yaws_soap_srv init.
           soap_srv_mods = [],
 
-          ysession_mod = yaws_session_server, % storage module for ysession
           acceptor_pool_size = 8,             % size of acceptor proc pool
 
           mime_types_info,                    % undefined | #mime_types_info{}
           nslookup_pref = [inet],             % [inet | inet6]
+          ysession_mod = yaws_session_server, % storage module for ysession
+          ysession_cookiegen,                 % ysession cookie generation module
           ysession_idle_timeout = 2*60*1000,  % default 2 minutes
           ysession_long_timeout = 60*60*1000, % default 1 hour
 
@@ -398,7 +399,14 @@
 
 %% Typically used in error printouts as in:
 %% error_logger:format("Err ~p at ~p~n", [Reason, ?stack()])
--define(stack(), try throw(1) catch _:_ -> erlang:get_stacktrace() end).
+-ifdef(OTP_RELEASE).
+-define(stack(), try throw(1) catch _:_:ST -> ST end).
+-define(MAKE_ST(CATCH,STVAR,BODY), CATCH:STVAR -> BODY).
+-else.
+-define(stack(), try throw(1) catch _:_ -> (fun erlang:get_stacktrace/0)() end).
+-define(MAKE_ST(CATCH,STVAR,BODY),
+        CATCH -> STVAR = (fun erlang:get_stacktrace/0)(), BODY).
+-endif.
 
 
 %%% The following is for emacs, do not remove

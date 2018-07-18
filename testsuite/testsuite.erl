@@ -31,7 +31,7 @@
          init/2, terminate/1,
          pre_init_per_suite/3,    post_end_per_suite/4,
          pre_init_per_group/3,    post_end_per_group/4,
-         pre_init_per_testcase/3, post_end_per_testcase/4
+         pre_init_per_testcase/3, post_init_per_testcase/4, post_end_per_testcase/4
         ]).
 
 
@@ -457,7 +457,19 @@ set_default_sockopts(https, SockOpts) ->
                     {verify, _} -> SockOpts;
                     false       -> [{verify, verify_none}|SockOpts]
                 end,
-    set_default_sockopts(http, SockOpts1);
+    SockOpts2 = case yaws_dynopts:have_ssl_sni() of
+                    true ->
+                        %% Explicitly disable SNI if not set because in
+                        %% Erlang/OTP 20.0, it is set by default to the Host
+                        %% value used in ssl:connect/4.
+                        case lists:keyfind(server_name_indication, 1, SockOpts1) of
+                            {server_name_indication, _} -> SockOpts1;
+                            false -> [{server_name_indication, disable}|SockOpts1]
+                        end;
+                    false ->
+                        SockOpts1
+                end,
+    set_default_sockopts(http, SockOpts2);
 set_default_sockopts(http, SockOpts) ->
     [binary, {active, false}|SockOpts].
 
@@ -617,6 +629,29 @@ pre_init_per_testcase(TestcaseName, Config, State) ->
     ?PRINT_START_TC(TestcaseName, Config),
     ?LOG("        ~-50s", [io_lib:format("~p...", [TestcaseName])]),
     {Config, State}.
+
+post_init_per_testcase(_TestcaseName, Config, Return, State) ->
+    Suite = State#ct_state.current_suite,
+    Red   = ?GET_ENV("RED_COLOR"),
+    Std   = ?GET_ENV("STD_COLOR"),
+    NewSuite = case Return of
+                   {error,Error} ->
+                       ?PRINT_TC_RESULT("Failed", Error),
+                       ?LOG("[ ~sKO~s ]~n", [Red, Std]),
+                       Suite#suite_state{failed=Suite#suite_state.failed+1};
+                   {fail,Reason} ->
+                       ?PRINT_TC_RESULT("Failed", Reason),
+                       ?LOG("[ ~sKO~s ]~n", [Red, Std]),
+                       Suite#suite_state{failed=Suite#suite_state.failed+1};
+                   {skip,_} ->
+                       ?PRINT_TC_RESULT("Skipped", none),
+                       ?LOG("[ ~sSKIPPED~s ]~n", [Std, Std]),
+                       Suite#suite_state{skipped=Suite#suite_state.skipped+1};
+                   _ ->
+                       Suite
+               end,
+    {Config, State#ct_state{current_suite=NewSuite}}.
+
 
 post_end_per_testcase(_TestcaseName, _Config, Return, State) ->
     Suite = State#ct_state.current_suite,
